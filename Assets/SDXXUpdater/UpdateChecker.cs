@@ -1,158 +1,193 @@
-using System.Collections;
-using System.Collections.Generic;
-using System.IO;
 using UnityEngine;
-using UnityEngine.Networking;
 using UnityEngine.UI;
-using Newtonsoft.Json;
+using System.IO;
+using System.Collections;
+using System.Net.Http;
+using System.Threading.Tasks;
 using System.IO.Compression;
+using Newtonsoft.Json.Linq;
 
-public class UpdateManager : MonoBehaviour
+public class Updater : MonoBehaviour
 {
-    public Text versionText;
-    public Slider progressBar;
-    public Text progressPercentage;
+    public Text statusText;
     public Button updateButton;
+    public Slider progressBar;
+    public Text progressText;
+    public Text sourceText;
+    public Text latestVersionText; // 追加：最新バージョンを表示するテキスト
 
     private string apiUrl;
     private string gameBatchFile;
-    private string downloadLocation;
-    private string unzipLocation;
-    private string versionFile;
+    private string downloadPath;
+    private string extractPath;
     private string gameTitle;
     private string currentVersion;
+    private string configFilePath = "config.json";
 
     void Start()
     {
-        LoadSettings();
-        LoadVersionInfo();
-        versionText.text = $"Ver. {currentVersion}";
-        updateButton.onClick.AddListener(CheckForUpdate);
+        LoadConfig();
+        CheckForUpdates();
     }
 
-    void LoadSettings()
+    void LoadConfig()
     {
-        string settingsPath = Path.Combine(Application.streamingAssetsPath, "settings.json");
-        string json = File.ReadAllText(settingsPath);
-        var settings = JsonConvert.DeserializeObject<Dictionary<string, string>>(json);
-        apiUrl = settings["api_url"];
-        gameBatchFile = settings["game_batch_file"];
-        downloadLocation = settings["download_location"];
-        unzipLocation = settings["unzip_location"];
-        versionFile = settings["version_file"];
+        string configContent = File.ReadAllText(configFilePath);
+        JObject config = JObject.Parse(configContent);
+
+        apiUrl = config["api_url"].ToString();
+        gameBatchFile = config["game_batch_file"].ToString();
+        downloadPath = config["download_path"].ToString();
+        extractPath = config["extract_path"].ToString();
+        gameTitle = config["game_info"]["game_title"].ToString();
+        currentVersion = config["game_info"]["current_version"].ToString();
+
+        updateButton.onClick.AddListener(StartUpdate);
     }
 
-    void LoadVersionInfo()
+    async void CheckForUpdates()
     {
-        string json = File.ReadAllText(versionFile);
-        var versionInfo = JsonConvert.DeserializeObject<Dictionary<string, string>>(json);
-        gameTitle = versionInfo["game_title"];
-        currentVersion = versionInfo["current_version"];
-    }
+        statusText.text = "アップデートを確認中";
 
-    void CheckForUpdate()
-    {
-        StartCoroutine(CheckForUpdateCoroutine());
-    }
-
-    IEnumerator CheckForUpdateCoroutine()
-    {
-        var requestData = new Dictionary<string, string>
+        bool offlineUpdateAvailable = CheckOfflineUpdate();
+        if (offlineUpdateAvailable)
         {
-            { "game_title", gameTitle },
-            { "current_version", currentVersion }
-        };
-        string json = JsonConvert.SerializeObject(requestData);
-
-        UnityWebRequest request = new UnityWebRequest(apiUrl, "POST");
-        byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes(json);
-        request.uploadHandler = new UploadHandlerRaw(bodyRaw);
-        request.downloadHandler = new DownloadHandlerBuffer();
-        request.SetRequestHeader("Content-Type", "application/json");
-
-        yield return request.SendWebRequest();
-
-        if (request.result == UnityWebRequest.Result.ConnectionError || request.result == UnityWebRequest.Result.ProtocolError)
-        {
-            Debug.LogError(request.error);
+            sourceText.text = "外部メディア";
+            statusText.text = "オフラインアップデートが利用可能です。";
+            updateButton.interactable = true;
         }
         else
         {
-            var responseData = JsonConvert.DeserializeObject<Dictionary<string, string>>(request.downloadHandler.text);
-            if (responseData.ContainsKey("update_url"))
+            HttpClient client = new HttpClient();
+            var response = await client.PostAsync(apiUrl, new StringContent($"{{\"game_title\": \"{gameTitle}\", \"current_version\": \"{currentVersion}\"}}", System.Text.Encoding.UTF8, "application/json"));
+
+            if (response.IsSuccessStatusCode)
             {
-                string updateUrl = responseData["update_url"];
-                StartCoroutine(DownloadAndUpdate(updateUrl));
+                var content = await response.Content.ReadAsStringAsync();
+                JObject jsonResponse = JObject.Parse(content);
+
+                if (jsonResponse.ContainsKey("latest_version"))
+                {
+                    string latestVersion = jsonResponse["latest_version"].ToString();
+                    latestVersionText.text = $"V. {latestVersion}"; // 追加：最新バージョンを表示
+                    sourceText.text = "サーバー";
+                    statusText.text = $"アップデートが利用可能です。";
+                    updateButton.interactable = true;
+                }
+                else
+                {
+                    statusText.text = "アップデートは必要ありません。";
+                    LaunchGame();
+                }
             }
             else
             {
-                LaunchGame();
+                statusText.text = "エラー:アップデート情報を取得することができませんでした。";
             }
         }
     }
 
-    IEnumerator DownloadAndUpdate(string updateUrl)
+    bool CheckOfflineUpdate()
     {
-        UnityWebRequest request = new UnityWebRequest(updateUrl, UnityWebRequest.kHttpVerbGET);
-        string filePath = Path.Combine(downloadLocation, "update.zip");
-        request.downloadHandler = new DownloadHandlerFile(filePath);
+        string offlineUpdatePath = "E:/update.zip";
+        return File.Exists(offlineUpdatePath);
+    }
 
-        request.SendWebRequest();
+    async void StartUpdate()
+    {
+        updateButton.interactable = false;
 
-        while (!request.isDone)
+        if (sourceText.text == "外部メディア")
         {
-            progressBar.value = request.downloadProgress;
-            progressPercentage.text = $"{(request.downloadProgress * 100).ToString("F0")}%";
-            yield return null;
-        }
-
-        if (request.result == UnityWebRequest.Result.ConnectionError || request.result == UnityWebRequest.Result.ProtocolError)
-        {
-            Debug.LogError(request.error);
+            string offlineUpdatePath = "E:/update.zip";
+            await ExtractAndCopyFiles(offlineUpdatePath);
         }
         else
         {
-            UnzipAndCopy(filePath);
-            UpdateVersionInfo();
-            LaunchGame();
+            HttpClient client = new HttpClient();
+            var response = await client.PostAsync(apiUrl, new StringContent($"{{\"game_title\": \"{gameTitle}\", \"current_version\": \"{currentVersion}\"}}", System.Text.Encoding.UTF8, "application/json"));
+
+            if (response.IsSuccessStatusCode)
+            {
+                var content = await response.Content.ReadAsStringAsync();
+                JObject jsonResponse = JObject.Parse(content);
+                string updateUrl = jsonResponse["update_url"].ToString();
+
+                await DownloadUpdate(updateUrl);
+            }
         }
     }
 
-    void UnzipAndCopy(string zipFilePath)
+    async Task DownloadUpdate(string url)
     {
-        if (Directory.Exists(unzipLocation))
+        HttpClient client = new HttpClient();
+        var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+
+        if (!response.IsSuccessStatusCode)
         {
-            Directory.Delete(unzipLocation, true);
+            statusText.text = "エラー:何らかの原因でダウンロードができませんでした";
+            return;
         }
-        ZipFile.ExtractToDirectory(zipFilePath, unzipLocation);
-        // アップデートファイルを適切なディレクトリにコピーする処理を追加
+
+        var totalBytes = response.Content.Headers.ContentLength ?? 1;
+        var downloadedBytes = 0L;
+
+        using (var stream = await response.Content.ReadAsStreamAsync())
+        {
+            using (var fileStream = new FileStream(downloadPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true))
+            {
+                var buffer = new byte[8192];
+                int bytesRead;
+
+                while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                {
+                    await fileStream.WriteAsync(buffer, 0, bytesRead);
+                    downloadedBytes += bytesRead;
+                    UpdateProgress(downloadedBytes, totalBytes);
+                }
+            }
+        }
+
+        await ExtractAndCopyFiles(downloadPath);
     }
 
-    void UpdateVersionInfo()
+    void UpdateProgress(long downloadedBytes, long totalBytes)
     {
-        // 新しいバージョン情報を取得し、version.jsonに書き込み
-        string json = File.ReadAllText(Path.Combine(unzipLocation, "new_version.json"));
-        File.WriteAllText(versionFile, json);
+        float progress = (float)downloadedBytes / totalBytes;
+        progressBar.value = progress;
+        progressText.text = $"{(progress * 100):0.00}%";
+    }
+
+    async Task ExtractAndCopyFiles(string zipPath)
+    {
+        statusText.text = "アップデートを展開しています。";
+        ZipFile.ExtractToDirectory(zipPath, extractPath);
+
+        // ファイルをコピーする処理を追加
+        // 例: DirectoryCopy(extractPath, gameDirectory, true);
+
+        statusText.text = "アップデートが完了しました。";
+        SaveNewVersion();
+        LaunchGame();
+    }
+
+    void SaveNewVersion()
+    {
+        string configContent = File.ReadAllText(configFilePath);
+        JObject config = JObject.Parse(configContent);
+        config["game_info"]["current_version"] = GetNewVersion();
+        File.WriteAllText(configFilePath, config.ToString());
+    }
+
+    string GetNewVersion()
+    {
+        // 新しいバージョン情報を取得するロジックを実装
+        return "1.2.3"; // 例
     }
 
     void LaunchGame()
     {
+        statusText.text = "ゲームプログラムを起動しています。";
         System.Diagnostics.Process.Start(gameBatchFile);
-        Application.Quit();
-    }
-
-    void CheckForOfflineUpdate()
-    {
-        string offlineUpdatePath = "E:/update.zip";
-        if (File.Exists(offlineUpdatePath))
-        {
-            UnzipAndCopy(offlineUpdatePath);
-            UpdateVersionInfo();
-            LaunchGame();
-        }
-        else
-        {
-            CheckForUpdate();
-        }
     }
 }

@@ -1,0 +1,10 @@
+{
+    "api_url": "http://localhost:5000/check_update",
+    "game_batch_file": "path/to/your/game.bat",
+    "download_path": "H:/dev/Download-path_dev",
+    "extract_path": "H:/dev/Extract-path_dev",
+    "game_info": {
+        "game_title": "SDDT",
+        "current_version": "1.45.1"
+    }
+}
